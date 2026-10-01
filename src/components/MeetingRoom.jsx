@@ -49,6 +49,7 @@ export default function MeetingRoom({ user }) {
   const peerRefs = useRef(new Map())
   const remoteStreamsRef = useRef(new Map())
   const pendingIceRef = useRef(new Map())
+  const rtcConfigRef = useRef({ iceServers: defaultIceServers })
   const socketRef = useRef(null)
   const localStreamRef = useRef(null)
   const messagesEndRef = useRef(null)
@@ -72,7 +73,7 @@ export default function MeetingRoom({ user }) {
 
   const addPeer = useCallback((socketId, name, createOffer) => {
     if (peerRefs.current.has(socketId)) return peerRefs.current.get(socketId)
-    const peer = new RTCPeerConnection({ iceServers: defaultIceServers })
+    const peer = new RTCPeerConnection(rtcConfigRef.current)
     peerRefs.current.set(socketId, peer)
     remoteStreamsRef.current.set(socketId, new MediaStream())
     const localTracks = localStreamRef.current?.getTracks() || []
@@ -124,6 +125,12 @@ export default function MeetingRoom({ user }) {
       }
       const { data } = await api.post(`/meetings/${encodeURIComponent(meetingId)}/join`, { name: displayName.trim() })
       setMeeting(data.meeting)
+      try {
+        const { data: iceConfig } = await api.get(`/meetings/${encodeURIComponent(meetingId)}/ice-config`)
+        if (iceConfig.iceServers?.length) rtcConfigRef.current = iceConfig
+      } catch {
+        rtcConfigRef.current = { iceServers: defaultIceServers }
+      }
       setIsJoined(true)
       const socketOptions = { auth: { token: localStorage.getItem('rajmeet-token') } }
       const socket = import.meta.env.VITE_SOCKET_URL
