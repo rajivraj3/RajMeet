@@ -92,7 +92,7 @@ Socket.IO authenticates using the JWT in the handshake. `join-room` announces ro
 - Deploy the API and client behind HTTPS, configure `CLIENT_URL` for the deployed client, and use a managed MongoDB deployment with network access restricted to the API.
 - For separate client and API hosts, set `VITE_API_URL` and `VITE_SOCKET_URL` in the frontend build environment, and set `CLIENT_URL` on the API to the exact HTTPS frontend origin. Rebuild the frontend after changing its `VITE_*` public URLs. Keep the API host, database URI, and signing key out of the browser bundle.
 - Set a strong, unique `JWT_SECRET` in the hosting provider’s secret manager. Do not put production secrets in Vite variables; `VITE_*` values are public in the browser bundle.
-- Configure a TURN server for reliable calls across restrictive NATs and enterprise firewalls. The current peer configuration includes a public STUN server only.
+- The current WebRTC path uses two public STUN servers while the basic peer flow is verified. Some restrictive NAT/firewall pairs will require TURN before they can connect.
 - The current mesh topology sends a separate peer connection to each participant and the room registry is in process memory. For larger rooms or horizontally scaled API instances, add an SFU and a shared Socket.IO adapter such as Redis.
 - Review token storage, retention, abuse controls, and observability against your deployment’s security requirements before opening registration publicly.
 

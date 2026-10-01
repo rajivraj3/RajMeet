@@ -48,14 +48,15 @@ export function attachMeetingSockets(io) {
         if (!isHost && !hasJoined) return acknowledge({ error: 'Join this space from the lobby first.' })
         socket.data.meetingId = normalizedId
         socket.data.name = user.name
-        socket.join(normalizedId)
         if (!roomMembers.has(normalizedId)) roomMembers.set(normalizedId, new Map())
         const members = roomMembers.get(normalizedId)
-        const existing = [...members.values()]
+        const existing = [...members.values()].filter((participant) => participant.socketId !== socket.id)
+        const isAlreadyMember = members.has(socket.id)
         const participant = { socketId: socket.id, userId: user.id, name: user.name, cameraOn: Boolean(cameraOn), micOn: Boolean(micOn) }
+        socket.join(normalizedId)
         members.set(socket.id, participant)
         socket.emit('room-users', existing)
-        socket.to(normalizedId).emit('user-joined', participant)
+        if (!isAlreadyMember) socket.to(normalizedId).emit('user-joined', participant)
         acknowledge({ meeting: { meetingId: meeting.meetingId, title: meeting.title, host: meeting.host?.name } })
       } catch (error) {
         console.error('Socket join-room failed:', error.message)
