@@ -126,10 +126,11 @@ export default function MeetingRoom({ user }) {
       const { data } = await api.post(`/meetings/${encodeURIComponent(meetingId)}/join`, { name: displayName.trim() })
       setMeeting(data.meeting)
       try {
-        const { data: iceConfig } = await api.get(`/meetings/${encodeURIComponent(meetingId)}/ice-config`)
+        const { data: iceConfig } = await api.get('/ice')
         if (iceConfig.iceServers?.length) rtcConfigRef.current = iceConfig
       } catch {
         rtcConfigRef.current = { iceServers: defaultIceServers }
+        setError('The TURN relay is unavailable. Calls may fail across different networks.')
       }
       setIsJoined(true)
       const socketOptions = { auth: { token: localStorage.getItem('rajmeet-token') } }

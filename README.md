@@ -69,8 +69,9 @@ At join time, the browser requests permission for selected media devices, posts 
 | `JWT_SECRET` | Signing key for seven-day access tokens | Generate a unique random value |
 | `VITE_API_URL` | Public API base URL used by the browser; include `/api` | `https://api.example.com/api` |
 | `VITE_SOCKET_URL` | Public Socket.IO server origin; leave blank for same-origin proxy | `https://api.example.com` |
-| `TURN_URLS` | Comma-separated TURN/TURNS URLs from a coturn REST-auth provider | Set on the API host only |
-| `TURN_SHARED_SECRET` | Provider-issued coturn REST shared secret used to mint expiring credentials | Set on the API host only; never use a `VITE_` prefix |
+| `XIRSYS_IDENT` | Xirsys account identifier for HTTP Basic authentication | Set on the API host only |
+| `XIRSYS_SECRET` | Xirsys secret for HTTP Basic authentication | Set on the API host only; never use a `VITE_` prefix |
+| `XIRSYS_CHANNEL` | Xirsys channel name used to request temporary ICE servers | Set on the API host only |
 
 The server can start without MongoDB configured so `/api/health` can report the disconnected state, but account and meeting APIs require a working database. `.env` is ignored by Git; only `.env.example` is tracked.
 
@@ -81,9 +82,10 @@ The server can start without MongoDB configured so `/api/health` can report the 
 - `POST/GET /api/meetings`, `GET/PUT/DELETE /api/meetings/:meetingId`
 - `POST /api/meetings/:meetingId/join`, `POST /api/meetings/:meetingId/leave`
 - `GET/POST /api/meetings/:meetingId/messages`
+- `GET /api/ice` (authenticated; returns temporary Xirsys ICE servers)
 - `GET /api/health`
 
-Account, profile, create/list, edit/delete, join/leave, and message-history routes require a bearer token. Meeting metadata can be looked up by its invitation code so the lobby can show the room before joining.
+Account, profile, create/list, edit/delete, join/leave, message-history, and ICE configuration routes require a bearer token. Meeting metadata can be looked up by its invitation code so the lobby can show the room before joining.
 
 ## Realtime events
 
@@ -94,7 +96,7 @@ Socket.IO authenticates using the JWT in the handshake. `join-room` announces ro
 - Deploy the API and client behind HTTPS, configure `CLIENT_URL` for the deployed client, and use a managed MongoDB deployment with network access restricted to the API.
 - For separate client and API hosts, set `VITE_API_URL` and `VITE_SOCKET_URL` in the frontend build environment, and set `CLIENT_URL` on the API to the exact HTTPS frontend origin. Rebuild the frontend after changing its `VITE_*` public URLs. Keep the API host, database URI, and signing key out of the browser bundle.
 - Set a strong, unique `JWT_SECRET` in the hosting provider’s secret manager. Do not put production secrets in Vite variables; `VITE_*` values are public in the browser bundle.
-- The WebRTC path uses two public STUN servers and can request short-lived coturn REST credentials from the authenticated API. Configure `TURN_URLS` and `TURN_SHARED_SECRET` from a real provider on the API host for cross-network reliability; without provider credentials, peers fall back to STUN and some NAT/firewall pairs will fail.
+- The WebRTC path requests temporary ICE servers from Xirsys through the authenticated API. Configure `XIRSYS_IDENT`, `XIRSYS_SECRET`, and `XIRSYS_CHANNEL` on the API host only; the secret is never returned to the browser. Two public STUN servers remain as a fallback if Xirsys is unavailable.
 - The current mesh topology sends a separate peer connection to each participant and the room registry is in process memory. For larger rooms or horizontally scaled API instances, add an SFU and a shared Socket.IO adapter such as Redis.
 - Review token storage, retention, abuse controls, and observability against your deployment’s security requirements before opening registration publicly.
 

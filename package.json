@@ -9,7 +9,7 @@
     "dev:server": "nodemon server/server.js",
     "start": "node server/server.js",
     "build": "vite build",
-    "test": "node --test src/utils/iceCandidates.test.js",
+    "test": "node --test src/utils/iceCandidates.test.js server/services/xirsys.test.js",
     "lint": "oxlint",
     "preview": "vite preview"
   },

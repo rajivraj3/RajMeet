@@ -8,6 +8,7 @@ import { Server } from 'socket.io'
 import { rateLimit } from 'express-rate-limit'
 import { connectDatabase } from './config/database.js'
 import authRoutes from './routes/authRoutes.js'
+import iceRoutes from './routes/iceRoutes.js'
 import meetingRoutes from './routes/meetingRoutes.js'
 import userRoutes from './routes/userRoutes.js'
 import { attachMeetingSockets } from './sockets/meetingSocket.js'
@@ -29,6 +30,7 @@ app.use('/api/auth', rateLimit({ windowMs: 15 * 60 * 1000, limit: 30, standardHe
 
 app.get('/api/health', (request, response) => response.json({ status: 'ok', database: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected' }))
 app.use('/api/auth', authRoutes)
+app.use('/api/ice', iceRoutes)
 app.use('/api/meetings', meetingRoutes)
 app.use('/api/users', userRoutes)
 app.use((request, response) => response.status(404).json({ message: 'That RajMeet route could not be found.' }))

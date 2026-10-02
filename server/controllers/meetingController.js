@@ -1,4 +1,4 @@
-import { createHmac, randomInt } from 'node:crypto'
+import { randomInt } from 'node:crypto'
 import { z } from 'zod'
 import Meeting from '../models/Meeting.js'
 import MeetingParticipant from '../models/MeetingParticipant.js'
@@ -63,28 +63,6 @@ export async function getMeeting(request, response) {
   if (meeting.privacy === 'private' && !isHost && !isParticipant) return response.status(403).json({ message: 'This space is set to host only.' })
   await meeting.populate('host', 'name avatar')
   return response.json({ meeting })
-}
-
-export async function getIceConfig(request, response) {
-  const meeting = await findMeeting(request.params.meetingId)
-  if (!meeting) return response.status(404).json({ message: 'That meeting code does not exist.' })
-  const isHost = String(meeting.host) === request.user.id
-  const isParticipant = meeting.participants.some((participant) => String(participant) === request.user.id)
-  if (!isHost && !isParticipant) return response.status(403).json({ message: 'Join the meeting before requesting media configuration.' })
-
-  const iceServers = [
-    { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' },
-  ]
-  const turnUrls = (process.env.TURN_URLS || '').split(',').map((url) => url.trim()).filter(Boolean)
-  const turnSecret = process.env.TURN_SHARED_SECRET
-  if (turnUrls.length && turnSecret) {
-    const expiresAt = Math.floor(Date.now() / 1000) + 8 * 60 * 60
-    const username = `${expiresAt}:${request.user.id}`
-    const credential = createHmac('sha1', turnSecret).update(username).digest('base64')
-    iceServers.push({ urls: turnUrls, username, credential })
-  }
-  return response.json({ iceServers })
 }
 
 export async function updateMeeting(request, response) {
