@@ -2,6 +2,13 @@
 
 RajMeet is a browser-based meeting workspace for creating and scheduling rooms, inviting people with short codes, and talking over peer-to-peer WebRTC. Its visual identity is built around calm, connected spaces rather than a conventional conference dashboard.
 
+## Live deployment
+
+- Frontend: [https://raj-meet.vercel.app](https://raj-meet.vercel.app)
+- Backend health: [https://rajmeet.onrender.com/api/health](https://rajmeet.onrender.com/api/health)
+
+Share a meeting-specific invite URL (`/meeting/RAJ-...`) with participants, not just the homepage.
+
 ## Features
 
 - JWT account registration and login with bcrypt password hashing
