@@ -88,17 +88,32 @@ export function attachMeetingSockets(io) {
       if (socket.data.meetingId) socket.to(socket.data.meetingId).emit('screen-share-stopped', { socketId: socket.id })
     })
 
-    socket.on('send-message', async ({ meetingId, message } = {}) => {
+    socket.on('send-message', async ({ meetingId, message, clientId } = {}) => {
       const normalizedId = String(meetingId || '').toUpperCase()
       const text = typeof message === 'string' ? message.trim().slice(0, 2000) : ''
+      const safeClientId = typeof clientId === 'string' ? clientId.trim() : ''
       if (!text || !socket.data.meetingId || socket.data.meetingId !== normalizedId) return
       try {
         const meeting = await Meeting.findOne({ meetingId: normalizedId })
         if (!meeting) return
-        const saved = await Message.create({ meeting: meeting._id, sender: socket.data.userId, message: text })
+        if (safeClientId) {
+          const existing = await Message.findOne({ meeting: meeting._id, clientId: safeClientId }).populate('sender', 'name avatar')
+          if (existing) {
+            io.to(normalizedId).emit('receive-message', existing)
+            return
+          }
+        }
+        const saved = await Message.create({ meeting: meeting._id, sender: socket.data.userId, message: text, clientId: safeClientId || undefined })
         await saved.populate('sender', 'name avatar')
         io.to(normalizedId).emit('receive-message', saved)
-      } catch (error) { console.error('Meeting message failed:', error.message) }
+      } catch (error) {
+        if (error?.code === 11000 && typeof clientId === 'string') {
+          const existing = await Message.findOne({ meeting: { $in: await Meeting.find({ meetingId: normalizedId }).distinct('_id') }, clientId }).populate('sender', 'name avatar')
+          if (existing) io.to(normalizedId).emit('receive-message', existing)
+          return
+        }
+        console.error('Meeting message failed:', error.message)
+      }
     })
 
     const leaveRoom = async () => {

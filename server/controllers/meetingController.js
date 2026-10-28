@@ -163,10 +163,14 @@ export async function getMessages(request, response) {
 }
 
 export async function postMessage(request, response) {
-  const input = z.object({ message: z.string().trim().min(1).max(2000) }).parse(request.body)
+  const input = z.object({ message: z.string().trim().min(1).max(2000), clientId: z.string().trim().min(1).max(128).optional() }).parse(request.body)
   const meeting = await findAccessibleMeeting(request.params.meetingId, request.user.id)
   if (!meeting) return response.status(404).json({ message: 'This meeting is not available in your space.' })
-  const saved = await Message.create({ meeting: meeting._id, sender: request.user.id, message: input.message })
+  if (input.clientId) {
+    const existing = await Message.findOne({ meeting: meeting._id, clientId: input.clientId }).populate('sender', 'name avatar')
+    if (existing) return response.status(200).json({ message: existing })
+  }
+  const saved = await Message.create({ meeting: meeting._id, sender: request.user.id, message: input.message, clientId: input.clientId })
   await saved.populate('sender', 'name avatar')
   return response.status(201).json({ message: saved })
 }

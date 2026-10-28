@@ -4,11 +4,31 @@ import { io } from 'socket.io-client'
 import { ArrowLeft, ArrowRight, Check, Copy, MessageCircle, Mic, MicOff, MonitorUp, Phone, Send, Users, Video, VideoOff, X } from 'lucide-react'
 import { api } from '../services/api'
 import { addOrQueueIceCandidate, flushPendingIceCandidates } from '../utils/iceCandidates.js'
+import { getMediaConstraints } from '../utils/mediaConstraints.js'
 
 const defaultIceServers = [
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
 ]
+
+function getMessageKey(message) {
+  if (!message) return ''
+  return message.clientId || message._id || message.id || `${message.sender?._id || message.sender || 'unknown'}:${String(message.message || '').trim()}:${message.createdAt || Date.now()}`
+}
+
+function mergeUniqueMessages(existingMessages = [], nextMessages = []) {
+  const seen = new Set()
+  return [...existingMessages, ...nextMessages].filter((message) => {
+    const key = getMessageKey(message)
+    if (!key || seen.has(key)) return false
+    seen.add(key)
+    return true
+  }).sort((left, right) => {
+    const leftStamp = left?.createdAt ? new Date(left.createdAt).getTime() : Number.NEGATIVE_INFINITY
+    const rightStamp = right?.createdAt ? new Date(right.createdAt).getTime() : Number.NEGATIVE_INFINITY
+    return leftStamp - rightStamp
+  })
+}
 
 function senderForKind(peer, kind) {
   return peer.getSenders().find((sender) => sender.track?.kind === kind)
@@ -20,7 +40,9 @@ function cleanupRoomResources(peerRefs, remoteStreamsRef, pendingIceRef, socketR
   peerRefs.current.clear()
   remoteStreamsRef.current.clear()
   pendingIceRef.current.clear()
+  socketRef.current?.removeAllListeners()
   socketRef.current?.disconnect()
+  socketRef.current = null
   shareStreamRef.current?.getTracks().forEach((track) => track.stop())
   localStreamRef.current?.getTracks().forEach((track) => track.stop())
 }
@@ -35,6 +57,7 @@ export default function MeetingRoom({ user }) {
   const [localStream, setLocalStream] = useState(null)
   const [remotePeers, setRemotePeers] = useState([])
   const [isJoined, setIsJoined] = useState(false)
+  const [isJoining, setIsJoining] = useState(false)
   const [cameraOn, setCameraOn] = useState(true)
   const [micOn, setMicOn] = useState(true)
   const [sharing, setSharing] = useState(false)
@@ -52,6 +75,7 @@ export default function MeetingRoom({ user }) {
   const rtcConfigRef = useRef({ iceServers: defaultIceServers })
   const socketRef = useRef(null)
   const localStreamRef = useRef(null)
+  const joinInProgressRef = useRef(false)
   const messagesEndRef = useRef(null)
   const shareStreamRef = useRef(null)
 
@@ -76,6 +100,7 @@ export default function MeetingRoom({ user }) {
     const peer = new RTCPeerConnection(rtcConfigRef.current)
     peerRefs.current.set(socketId, peer)
     remoteStreamsRef.current.set(socketId, new MediaStream())
+    let iceRestartPending = false
     const localTracks = localStreamRef.current?.getTracks() || []
     localTracks.forEach((track) => peer.addTrack(track, localStreamRef.current))
     for (const kind of ['audio', 'video']) {
@@ -100,8 +125,25 @@ export default function MeetingRoom({ user }) {
       else if (peer.connectionState === 'connecting') setConnection('Connecting media')
     }
     peer.oniceconnectionstatechange = () => {
-      if (peer.iceConnectionState === 'failed') setConnection('Network path failed. A TURN relay may be needed.')
-      else if (peer.iceConnectionState === 'disconnected') setConnection('Network connection interrupted')
+      if (peer.iceConnectionState === 'failed') {
+        setConnection('Network path failed. Trying to reconnect…')
+        if (!iceRestartPending && socketRef.current?.id < socketId && peer.signalingState === 'stable') {
+          iceRestartPending = true
+          void (async () => {
+            try {
+              peer.restartIce()
+              const offer = await peer.createOffer({ iceRestart: true })
+              await peer.setLocalDescription(offer)
+              socketRef.current?.emit('offer', { to: socketId, offer: peer.localDescription, name: displayName })
+            } catch {
+              iceRestartPending = false
+              setConnection('Network path failed. A TURN relay may be needed.')
+            }
+          })()
+        }
+      } else if (peer.iceConnectionState === 'connected' || peer.iceConnectionState === 'completed') {
+        iceRestartPending = false
+      } else if (peer.iceConnectionState === 'disconnected') setConnection('Network connection interrupted')
     }
     if (createOffer) peer.createOffer().then((offer) => peer.setLocalDescription(offer).then(() => socketRef.current?.emit('offer', { to: socketId, offer: peer.localDescription, name: displayName }))).catch(() => setError('Could not start a secure peer connection.'))
     return peer
@@ -109,16 +151,21 @@ export default function MeetingRoom({ user }) {
 
   const joinMeeting = async (event) => {
     event.preventDefault()
+    if (joinInProgressRef.current) return
     setError('')
     if (!displayName.trim()) return setError('Add a name so people know you’ve arrived.')
+    joinInProgressRef.current = true
+    setIsJoining(true)
     try {
       let stream = localStreamRef.current
       if (!stream && (cameraOn || micOn)) {
         try {
-          stream = await navigator.mediaDevices.getUserMedia({ video: cameraOn, audio: micOn })
+          stream = await navigator.mediaDevices.getUserMedia(getMediaConstraints(cameraOn, micOn))
           localStreamRef.current = stream
           setLocalStream(stream)
         } catch (mediaError) {
+          joinInProgressRef.current = false
+          setIsJoining(false)
           setError(mediaError.name === 'NotAllowedError' ? 'Camera or microphone access was denied. You can still join with both turned off.' : 'No camera or microphone was found. You can still join without them.')
           return
         }
@@ -137,11 +184,24 @@ export default function MeetingRoom({ user }) {
       const socket = import.meta.env.VITE_SOCKET_URL
         ? io(import.meta.env.VITE_SOCKET_URL, socketOptions)
         : io(socketOptions)
+      if (socketRef.current) {
+        socketRef.current.removeAllListeners()
+        socketRef.current.disconnect()
+      }
       socketRef.current = socket
       socket.on('connect', () => {
         setConnection('Connecting to people')
         socket.emit('join-room', { meetingId, name: displayName.trim(), cameraOn, micOn }, (result) => {
-          if (result?.error) { setError(result.error); socket.disconnect(); setIsJoined(false) }
+          if (result?.error) {
+            setError(result.error)
+            socket.disconnect()
+            socketRef.current = null
+            joinInProgressRef.current = false
+            setIsJoining(false)
+            setIsJoined(false)
+          } else {
+            setIsJoining(false)
+          }
         })
       })
       socket.on('room-users', (participants) => {
@@ -197,10 +257,20 @@ export default function MeetingRoom({ user }) {
         setConnection('Someone just left')
       })
       socket.on('participant-updated', ({ socketId, cameraOn: nextCamera, micOn: nextMic }) => setRemotePeers((current) => current.map((peer) => peer.id === socketId ? { ...peer, cameraOn: nextCamera, micOn: nextMic } : peer)))
-      socket.on('receive-message', (incoming) => setChat((current) => [...current, incoming]))
-      socket.on('connect_error', () => { setConnection('Signaling unavailable'); setError('The meeting signal was interrupted. Check your connection and rejoin.') })
-      api.get(`/meetings/${encodeURIComponent(meetingId)}/messages`).then(({ data: messages }) => setChat(messages.messages || [])).catch(() => {})
+      socket.on('receive-message', (incoming) => setChat((current) => mergeUniqueMessages(current, [incoming])))
+      socket.on('connect_error', () => {
+        setConnection('Signaling unavailable')
+        setError('The meeting signal was interrupted. Check your connection and rejoin.')
+        socket.disconnect()
+        socketRef.current = null
+        joinInProgressRef.current = false
+        setIsJoining(false)
+        setIsJoined(false)
+      })
+      api.get(`/meetings/${encodeURIComponent(meetingId)}/messages`).then(({ data: messages }) => setChat((current) => mergeUniqueMessages(current, messages.messages || []))).catch(() => {})
     } catch (e) {
+      joinInProgressRef.current = false
+      setIsJoining(false)
       setError(e.response?.data?.message || 'This meeting could not be joined. Check the link and try again.')
     }
   }
@@ -211,7 +281,7 @@ export default function MeetingRoom({ user }) {
     let track = localStreamRef.current?.getTracks().find((item) => item.kind === (isCamera ? 'video' : 'audio'))
     if (next && !track) {
       try {
-        const deviceStream = await navigator.mediaDevices.getUserMedia({ video: isCamera, audio: !isCamera })
+        const deviceStream = await navigator.mediaDevices.getUserMedia(getMediaConstraints(isCamera, !isCamera))
         track = deviceStream.getTracks()[0]
         const stream = localStreamRef.current || deviceStream
         if (localStreamRef.current) stream.addTrack(track)
@@ -263,7 +333,9 @@ export default function MeetingRoom({ user }) {
   const leaveMeeting = async () => {
     try { await api.post(`/meetings/${encodeURIComponent(meetingId)}/leave`) } catch { /* The socket disconnect still removes this participant. */ }
     socketRef.current?.emit('leave-room', { meetingId })
+    socketRef.current?.removeAllListeners()
     socketRef.current?.disconnect()
+    socketRef.current = null
     peerRefs.current.forEach((peer) => peer.close())
     peerRefs.current.clear()
     localStreamRef.current?.getTracks().forEach((track) => track.stop())
@@ -275,7 +347,17 @@ export default function MeetingRoom({ user }) {
     event.preventDefault()
     const text = message.trim()
     if (!text) return
-    socketRef.current?.emit('send-message', { meetingId, message: text })
+    const clientId = `${Date.now()}-${Math.random().toString(16).slice(2)}`
+    const optimisticMessage = {
+      _id: clientId,
+      clientId,
+      message: text,
+      sender: { _id: userId, name: displayName },
+      senderName: displayName,
+      createdAt: new Date().toISOString(),
+    }
+    setChat((current) => mergeUniqueMessages(current, [optimisticMessage]))
+    socketRef.current?.emit('send-message', { meetingId, message: text, clientId })
     setMessage('')
   }
 
@@ -283,12 +365,12 @@ export default function MeetingRoom({ user }) {
     try { await navigator.clipboard.writeText(window.location.href); setCopyState(true); setTimeout(() => setCopyState(false), 1800) } catch { setError('Could not copy the invitation link.') }
   }
 
-  if (!isJoined) return <main className="lobby-shell"><header className="lobby-top"><Link to="/" className="brand"><span className="brand-mark"><span /><span /><span /></span><span>raj<span className="brand-light">meet</span></span></Link><Link to="/" className="lobby-back"><ArrowLeft size={15} /> Back to your space</Link></header><div className="lobby-content"><div className="eyebrow">YOUR SPACE IS READY / {meetingId}</div><h1>Welcome to<br /><em>the space.</em></h1><p className="lobby-description">{meeting ? meeting.title : 'Finding this meeting…'}{meeting?.host?.name ? ` · hosted by ${meeting.host.name}` : ''}</p><div className="lobby-grid"><div className="lobby-preview"><video ref={previewRef} autoPlay muted playsInline /><div className="preview-overlay"><span className="preview-status"><span /> Preview</span>{localStream && <button className="preview-toggle" onClick={() => toggleMedia('camera')} aria-label={cameraOn ? 'Turn camera off' : 'Turn camera on'}>{cameraOn ? <Video size={16} /> : <VideoOff size={16} />}</button>}</div>{!localStream && <div className="preview-empty"><span className="preview-avatar">{displayName.split(' ').map((part) => part[0]).join('').slice(0, 2).toUpperCase() || 'RM'}</span><button className="preview-enable" onClick={async () => { if (!cameraOn && !micOn) return setError('Turn on a device to preview it.'); try { const stream = await navigator.mediaDevices.getUserMedia({ video: cameraOn, audio: micOn }); localStreamRef.current = stream; setLocalStream(stream); setError('') } catch { setError('Camera or microphone access was denied. You can still join with both turned off.') } }}><Video size={15} /> Turn on camera</button></div>}<div className="preview-name">{displayName || 'You'} <span>YOU</span></div></div><form className="lobby-settings" onSubmit={joinMeeting}><div className="eyebrow">BEFORE YOU JOIN</div><h2>Ready when<br />you are.</h2><label>Your display name<input required maxLength="80" value={displayName} onChange={(e) => setDisplayName(e.target.value)} placeholder="What should we call you?" /></label><div className="lobby-device-row"><span><Mic size={16} /> Microphone</span><button type="button" className={`toggle-pill ${micOn ? 'toggle-on' : ''}`} onClick={() => toggleMedia('mic')} aria-label={micOn ? 'Turn microphone off' : 'Turn microphone on'}><span /></button></div><div className="lobby-device-row"><span><Video size={16} /> Camera</span><button type="button" className={`toggle-pill ${cameraOn ? 'toggle-on' : ''}`} onClick={() => toggleMedia('camera')} aria-label={cameraOn ? 'Turn camera off' : 'Turn camera on'}><span /></button></div>{error && <div className="inline-error" role="alert">{error}{!user && <Link to="/login" state={{ from: `${location.pathname}?lobby=1` }}>Sign in to join</Link>}</div>}{!user && <Link className="lobby-invite" to="/login" state={{ from: `${location.pathname}?lobby=1` }}>Sign in to join this space</Link>}<button className="button button-dark lobby-join" disabled={!user}>Join this space <ArrowRight size={16} /></button><button type="button" className="lobby-invite" onClick={copyInvite}>{copyState ? <Check size={15} /> : <Copy size={15} />}{copyState ? 'Invite copied' : 'Copy invite link'}</button></form></div></div></main>
+  if (!isJoined) return <main className="lobby-shell"><header className="lobby-top"><Link to="/" className="brand"><span className="brand-mark"><span /><span /><span /></span><span>raj<span className="brand-light">meet</span></span></Link><Link to="/" className="lobby-back"><ArrowLeft size={15} /> Back to your space</Link></header><div className="lobby-content"><div className="eyebrow">YOUR SPACE IS READY / {meetingId}</div><h1>Welcome to<br /><em>the space.</em></h1><p className="lobby-description">{meeting ? meeting.title : 'Finding this meeting…'}{meeting?.host?.name ? ` · hosted by ${meeting.host.name}` : ''}</p><div className="lobby-grid"><div className="lobby-preview"><video ref={previewRef} autoPlay muted playsInline /><div className="preview-overlay"><span className="preview-status"><span /> Preview</span>{localStream && <button className="preview-toggle" onClick={() => toggleMedia('camera')} aria-label={cameraOn ? 'Turn camera off' : 'Turn camera on'}>{cameraOn ? <Video size={16} /> : <VideoOff size={16} />}</button>}</div>{!localStream && <div className="preview-empty"><span className="preview-avatar">{displayName.split(' ').map((part) => part[0]).join('').slice(0, 2).toUpperCase() || 'RM'}</span><button className="preview-enable" onClick={async () => { if (!cameraOn && !micOn) return setError('Turn on a device to preview it.'); try { const stream = await navigator.mediaDevices.getUserMedia(getMediaConstraints(cameraOn, micOn)); localStreamRef.current = stream; setLocalStream(stream); setError('') } catch { setError('Camera or microphone access was denied. You can still join with both turned off.') } }}><Video size={15} /> Turn on camera</button></div>}<div className="preview-name">{displayName || 'You'} <span>YOU</span></div></div><form className="lobby-settings" onSubmit={joinMeeting}><div className="eyebrow">BEFORE YOU JOIN</div><h2>Ready when<br />you are.</h2><label>Your display name<input required maxLength="80" value={displayName} onChange={(e) => setDisplayName(e.target.value)} placeholder="What should we call you?" /></label><div className="lobby-device-row"><span><Mic size={16} /> Microphone</span><button type="button" className={`toggle-pill ${micOn ? 'toggle-on' : ''}`} onClick={() => toggleMedia('mic')} aria-label={micOn ? 'Turn microphone off' : 'Turn microphone on'}><span /></button></div><div className="lobby-device-row"><span><Video size={16} /> Camera</span><button type="button" className={`toggle-pill ${cameraOn ? 'toggle-on' : ''}`} onClick={() => toggleMedia('camera')} aria-label={cameraOn ? 'Turn camera off' : 'Turn camera on'}><span /></button></div>{error && <div className="inline-error" role="alert">{error}{!user && <Link to="/login" state={{ from: `${location.pathname}?lobby=1` }}>Sign in to join</Link>}</div>}{!user && <Link className="lobby-invite" to="/login" state={{ from: `${location.pathname}?lobby=1` }}>Sign in to join this space</Link>}<button className="button button-dark lobby-join" disabled={!user || isJoining}>{isJoining ? 'Joining…' : 'Join this space'} <ArrowRight size={16} /></button><button type="button" className="lobby-invite" onClick={copyInvite}>{copyState ? <Check size={15} /> : <Copy size={15} />}{copyState ? 'Invite copied' : 'Copy invite link'}</button></form></div></div></main>
 
   return <main className="room-shell"><header className="room-top"><Link to="/" className="brand"><span className="brand-mark"><span /><span /><span /></span><span>raj<span className="brand-light">meet</span></span></Link><div className="room-title"><strong>{meeting?.title || 'A RajMeet space'}</strong><span>{meetingId}</span></div><div className={`room-status ${/failed|interrupted|unavailable/i.test(connection) ? 'room-status-error' : ''}`}><span className="status-dot" />{connection}</div><button className="room-invite" onClick={copyInvite}>{copyState ? <Check size={15} /> : <Copy size={15} />}{copyState ? 'Copied' : 'Invite'}</button></header>
     {error && <div className="room-error" role="alert"><span>{error}</span><button onClick={() => setError('')} aria-label="Dismiss error"><X size={14} /></button></div>}
     {sharing && <div className="sharing-banner"><MonitorUp size={15} /> You are sharing your screen <button onClick={shareScreen}>Stop sharing</button></div>}
-    <div className={`room-content ${panel ? 'with-panel' : ''}`}><section className="video-grid" aria-label="Meeting participants"><div className={`video-tile self-tile ${cameraOn ? '' : 'video-off'}`}><video ref={localVideoRef} autoPlay muted playsInline />{!cameraOn && <div className="video-placeholder"><span>{displayName.slice(0, 2).toUpperCase()}</span></div>}<div className="tile-label">{displayName} <span>YOU</span><span className="tile-mic">{micOn ? <Mic size={13} /> : <MicOff size={13} />}</span></div></div>{remotePeers.map((peer) => <PeerTile key={peer.id} peer={peer} />)}{remotePeers.length === 0 && <div className="waiting-tile"><span className="waiting-orbit"><Users size={23} /></span><strong>You’re the first to arrive.</strong><small>Share your invite to bring everyone in.</small><button onClick={copyInvite}>{copyState ? <Check size={14} /> : <Copy size={14} />}{copyState ? 'Copied' : 'Copy invite link'}</button></div>}</section>{panel && <aside className="room-panel"><div className="panel-header"><div><span className="eyebrow">{panel === 'chat' ? 'CONVERSATION' : 'IN THIS SPACE'}</span><h2>{panel === 'chat' ? 'Messages' : `People (${remotePeers.length + 1})`}</h2></div><button className="icon-button" onClick={() => setPanel('')} aria-label="Close panel"><X size={18} /></button></div>{panel === 'chat' ? <><div className="chat-messages">{chat.map((item, index) => <div className="chat-message" key={`${item.createdAt || index}-${index}`}><strong>{item.sender?.name || item.senderName || 'A participant'}</strong><p>{item.message}</p><small>{item.createdAt ? new Date(item.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : 'now'}</small></div>)}{chat.length === 0 && <p className="panel-empty">Say hello. Every great conversation starts somewhere.</p>}<div ref={messagesEndRef} /></div><form className="chat-form" onSubmit={sendMessage}><input value={message} onChange={(e) => setMessage(e.target.value)} placeholder="Write a message…" aria-label="Write a message" /><button aria-label="Send message"><Send size={16} /></button></form></> : <div className="panel-people"><Participant name={displayName} micOn={micOn} cameraOn={cameraOn} host={Boolean(user)} />{remotePeers.map((peer) => <Participant key={peer.id} name={peer.name} micOn={peer.micOn} cameraOn={peer.cameraOn} />)}</div>}</aside>}</div>
+    <div className={`room-content ${panel ? 'with-panel' : ''}`}><section className="video-grid" aria-label="Meeting participants"><div className={`video-tile self-tile ${cameraOn ? '' : 'video-off'}`}><video ref={localVideoRef} autoPlay muted playsInline />{!cameraOn && <div className="video-placeholder"><span>{displayName.slice(0, 2).toUpperCase()}</span></div>}<div className="tile-label">{displayName} <span>YOU</span><span className="tile-mic">{micOn ? <Mic size={13} /> : <MicOff size={13} />}</span></div></div>{remotePeers.map((peer) => <PeerTile key={peer.id} peer={peer} />)}{remotePeers.length === 0 && <div className="waiting-tile"><span className="waiting-orbit"><Users size={23} /></span><strong>You’re the first to arrive.</strong><small>Share your invite to bring everyone in.</small><button onClick={copyInvite}>{copyState ? <Check size={14} /> : <Copy size={14} />}{copyState ? 'Copied' : 'Copy invite link'}</button></div>}</section>{panel && <aside className="room-panel"><div className="panel-header"><div><span className="eyebrow">{panel === 'chat' ? 'CONVERSATION' : 'IN THIS SPACE'}</span><h2>{panel === 'chat' ? 'Messages' : `People (${remotePeers.length + 1})`}</h2></div><button className="icon-button" onClick={() => setPanel('')} aria-label="Close panel"><X size={18} /></button></div>{panel === 'chat' ? <><div className="chat-messages">{chat.map((item) => <div className="chat-message" key={getMessageKey(item)}><strong>{item.sender?.name || item.senderName || 'A participant'}</strong><p>{item.message}</p><small>{item.createdAt ? new Date(item.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : 'now'}</small></div>)}{chat.length === 0 && <p className="panel-empty">Say hello. Every great conversation starts somewhere.</p>}<div ref={messagesEndRef} /></div><form className="chat-form" onSubmit={sendMessage}><input value={message} onChange={(e) => setMessage(e.target.value)} placeholder="Write a message…" aria-label="Write a message" /><button aria-label="Send message"><Send size={16} /></button></form></> : <div className="panel-people"><Participant name={displayName} micOn={micOn} cameraOn={cameraOn} host={Boolean(user)} />{remotePeers.map((peer) => <Participant key={peer.id} name={peer.name} micOn={peer.micOn} cameraOn={peer.cameraOn} />)}</div>}</aside>}</div>
     <nav className="meeting-controls" aria-label="Meeting controls"><button onClick={() => toggleMedia('mic')} className={`control-button ${micOn ? '' : 'control-muted'}`} aria-label={micOn ? 'Mute microphone' : 'Unmute microphone'}>{micOn ? <Mic size={18} /> : <MicOff size={18} />}<span>{micOn ? 'Mute' : 'Unmute'}</span></button><button onClick={() => toggleMedia('camera')} className={`control-button ${cameraOn ? '' : 'control-muted'}`} aria-label={cameraOn ? 'Turn camera off' : 'Turn camera on'}>{cameraOn ? <Video size={18} /> : <VideoOff size={18} />}<span>Camera</span></button><button onClick={shareScreen} className={`control-button ${sharing ? 'control-active' : ''}`} aria-label={sharing ? 'Stop sharing screen' : 'Share screen'}><MonitorUp size={18} /><span>{sharing ? 'Stop share' : 'Share'}</span></button><button onClick={() => setPanel(panel === 'chat' ? '' : 'chat')} className={`control-button ${panel === 'chat' ? 'control-active' : ''}`} aria-label="Open chat"><MessageCircle size={18} /><span>Chat</span></button><button onClick={() => setPanel(panel === 'people' ? '' : 'people')} className={`control-button ${panel === 'people' ? 'control-active' : ''}`} aria-label="Open participants"><Users size={18} /><span>People</span><span className="control-count">{remotePeers.length + 1}</span></button><button className="leave-button" onClick={leaveMeeting} aria-label="Leave meeting"><Phone size={17} /><span>Leave</span></button></nav>
   </main>
 }
